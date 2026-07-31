@@ -1,15 +1,15 @@
+import argamak/axis.{type Axes, type Axis, Infer}
+import argamak/format.{type Float32, type Format, type Int32}
+import argamak/space.{type Space}
 import gleam/bool
 import gleam/dict
-import gleam/io
 import gleam/int
-import gleam/iterator
+import gleam/io
 import gleam/list
 import gleam/result
 import gleam/string
-import gleam/string_builder.{type StringBuilder}
-import argamak/axis.{type Axes, type Axis, Axis, Infer}
-import argamak/format.{type Float32, type Format, type Int32}
-import argamak/space.{type Space}
+import gleam/string_tree.{type StringTree}
+import gleam/yielder
 
 /// A `Tensor` is a generic container for n-dimensional data structures.
 ///
@@ -105,8 +105,10 @@ pub fn from_int(x: Int) -> Tensor(Int32) {
 ///
 pub fn from_bool(x: Bool) -> Tensor(Int32) {
   let assert Ok(x) =
-    x
-    |> bool.to_int
+    case x {
+      True -> 1
+      False -> 0
+    }
     |> tensor(into: space.new(), with: format.int32())
   x
 }
@@ -270,7 +272,12 @@ pub fn from_ints(of xs: List(Int), into space: Space) -> TensorResult(Int32) {
 ///
 pub fn from_bools(of xs: List(Bool), into space: Space) -> TensorResult(Int32) {
   xs
-  |> list.map(with: bool.to_int)
+  |> list.map(with: fn(b) {
+    case b {
+      True -> 1
+      False -> 0
+    }
+  })
   |> tensor(into: space, with: format.int32())
 }
 
@@ -1714,7 +1721,10 @@ pub fn try_divide(from a: Tensor(a), by b: Tensor(a)) -> TensorResult(a) {
 /// Error(CannotBroadcast)
 /// ```
 ///
-pub fn remainder(from a: Tensor(a), divided_by b: Tensor(a)) -> TensorResult(a) {
+pub fn remainder(
+  from a: Tensor(a),
+  divided_by b: Tensor(a),
+) -> TensorResult(a) {
   do_remainder(a, b)
 }
 
@@ -1864,7 +1874,10 @@ fn javascript_modulo(a: Native, b: Native) -> NativeResult
 /// Error(ZeroDivision)
 /// ```
 ///
-pub fn try_modulo(from a: Tensor(a), divided_by b: Tensor(a)) -> TensorResult(a) {
+pub fn try_modulo(
+  from a: Tensor(a),
+  divided_by b: Tensor(a),
+) -> TensorResult(a) {
   use b <- result.try(all_nonzero(b))
   modulo(from: a, divided_by: b)
 }
@@ -3422,9 +3435,9 @@ pub fn concat(
 
   use index <- result.try(
     new_axes
-    |> iterator.from_list
-    |> iterator.index
-    |> iterator.find(one_that: fn(item) { find(item.0) })
+    |> yielder.from_list
+    |> yielder.index
+    |> yielder.find(one_that: fn(item) { find(item.0) })
     |> result.map(with: fn(x) { x.1 })
     |> result.replace_error(AxisNotFound),
   )
@@ -3437,9 +3450,9 @@ pub fn concat(
     )
     let pairs =
       pairs
-      |> iterator.from_list
-      |> iterator.index
-    use new_axes, pair <- iterator.try_fold(over: pairs, from: [])
+      |> yielder.from_list
+      |> yielder.index
+    use new_axes, pair <- yielder.try_fold(over: pairs, from: [])
     let #(#(a, b), i) = pair
     case axis.name(a) == axis.name(b) {
       True if i == index ->
@@ -3762,10 +3775,14 @@ pub fn to_string(
 fn columns() -> Int
 
 type ToStringAcc {
-  ToStringAcc(built: List(StringBuilder), builder: StringBuilder)
+  ToStringAcc(built: List(StringTree), builder: StringTree)
 }
 
-fn do_to_string(from x: Tensor(a), wrap_at column: Int, with tab: Int) -> String {
+fn do_to_string(
+  from x: Tensor(a),
+  wrap_at column: Int,
+  with tab: Int,
+) -> String {
   let #(xs, item_length) =
     x
     |> to_native
@@ -3796,26 +3813,25 @@ fn do_to_string(from x: Tensor(a), wrap_at column: Int, with tab: Int) -> String
   }
 
   let ToStringAcc(builder: init_builder, ..) as to_string_acc =
-    ToStringAcc(built: [], builder: string_builder.new())
+    ToStringAcc(built: [], builder: string_tree.new())
 
   let xs =
-    iterator.index({
-      use x <- iterator.map(over: iterator.from_list(xs))
+    yielder.index({
+      use x <- yielder.map(over: yielder.from_list(xs))
       x
-      |> string.pad_left(to: item_length, with: " ")
-      |> string_builder.from_string
+      |> string.pad_start(to: item_length, with: " ")
+      |> string_tree.from_string
     })
 
   let assert [#(xs, _)] =
-    iterator.to_list({
+    yielder.to_list({
       use acc, size, i <- list.index_fold(over: shape, from: xs)
       let should_build = fn(j) { { j + 1 } % size == 0 }
       let ToStringAcc(built: built, ..) = case i {
         0 -> {
-          use acc, item <- iterator.fold(over: acc, from: to_string_acc)
+          use acc, item <- yielder.fold(over: acc, from: to_string_acc)
           let #(x, j) = item
-          let builder =
-            string_builder.append_builder(to: acc.builder, suffix: x)
+          let builder = string_tree.append_tree(to: acc.builder, suffix: x)
           let should_build_j = should_build(j)
           use <- bool.lazy_guard(
             when: should_build_j && rank == 0,
@@ -3826,8 +3842,8 @@ fn do_to_string(from x: Tensor(a), wrap_at column: Int, with tab: Int) -> String
           use <- bool.lazy_guard(when: should_build_j, return: fn() {
             let builder =
               builder
-              |> string_builder.prepend(prefix: "[")
-              |> string_builder.append(suffix: "]")
+              |> string_tree.prepend(prefix: "[")
+              |> string_tree.append(suffix: "]")
             ToStringAcc(
               built: list.append(acc.built, [builder]),
               builder: init_builder,
@@ -3837,24 +3853,23 @@ fn do_to_string(from x: Tensor(a), wrap_at column: Int, with tab: Int) -> String
             let indent = string.repeat(" ", times: tab + rank)
             let builder =
               builder
-              |> string_builder.append(suffix: ",\n")
-              |> string_builder.append(suffix: indent)
+              |> string_tree.append(suffix: ",\n")
+              |> string_tree.append(suffix: indent)
             ToStringAcc(..acc, builder: builder)
           })
           // else
-          let builder = string_builder.append(to: builder, suffix: ", ")
+          let builder = string_tree.append(to: builder, suffix: ", ")
           ToStringAcc(..acc, builder: builder)
         }
         _else -> {
-          use acc, item <- iterator.fold(over: acc, from: to_string_acc)
+          use acc, item <- yielder.fold(over: acc, from: to_string_acc)
           let #(x, j) = item
-          let builder =
-            string_builder.append_builder(to: acc.builder, suffix: x)
+          let builder = string_tree.append_tree(to: acc.builder, suffix: x)
           use <- bool.lazy_guard(when: should_build(j), return: fn() {
             let builder =
               builder
-              |> string_builder.prepend(prefix: "[")
-              |> string_builder.append(suffix: "]")
+              |> string_tree.prepend(prefix: "[")
+              |> string_tree.append(suffix: "]")
             ToStringAcc(
               built: list.append(acc.built, [builder]),
               builder: init_builder,
@@ -3864,20 +3879,20 @@ fn do_to_string(from x: Tensor(a), wrap_at column: Int, with tab: Int) -> String
           let indent = string.repeat(" ", times: tab + rank - i)
           let builder =
             builder
-            |> string_builder.append(suffix: ",\n")
-            |> string_builder.append(suffix: indent)
+            |> string_tree.append(suffix: ",\n")
+            |> string_tree.append(suffix: indent)
           ToStringAcc(..acc, builder: builder)
         }
       }
       built
-      |> iterator.from_list
-      |> iterator.index
+      |> yielder.from_list
+      |> yielder.index
     })
 
   let indent = string.repeat(" ", times: tab)
   xs
-  |> string_builder.prepend(prefix: indent)
-  |> string_builder.to_string
+  |> string_tree.prepend(prefix: indent)
+  |> string_tree.to_string
 }
 
 @external(erlang, "argamak_ffi", "prepare_to_string")
